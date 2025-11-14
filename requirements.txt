@@ -1,6 +1,7 @@
-﻿mss
 opencv-python
 numpy
+mss
 pyautogui
 keyboard
 pillow
+ujson

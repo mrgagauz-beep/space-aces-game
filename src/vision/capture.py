@@ -1,45 +1,101 @@
-import mss
+"""
+Screen capture helpers for Space Aces Bot.
+
+Provides thin wrappers around MSS to grab specific ROIs
+as OpenCV-compatible BGR NumPy arrays.
+"""
+
+from typing import Tuple
+
 import cv2
+import mss
 import numpy as np
+import logging
+
+from utils.logger import setup_logger
+
+setup_logger()
+logger = logging.getLogger(__name__)
 
 
-def _get_roi_value(roi, key):
+def capture_roi(roi: Tuple[int, int, int, int]) -> np.ndarray:
     """
-    Extract coordinate value from roi which can be a dict or an object
-    with attributes x, y, width, height.
-    """
-    if isinstance(roi, dict):
-        return roi[key]
-    return getattr(roi, key)
-
-
-def capture_screen(roi):
-    """
-    Capture a screenshot of the specified region of the screen.
+    Capture a screenshot of the given ROI.
 
     Parameters
     ----------
-    roi : dict or object
-        Region of interest with fields/keys: x, y, width, height.
+    roi : tuple[int, int, int, int]
+        Region of interest as (x, y, width, height).
 
     Returns
     -------
     numpy.ndarray
-        Image in BGR format suitable for OpenCV.
+        Captured image in BGR format.
     """
-    region = {
-        "left": _get_roi_value(roi, "x"),
-        "top": _get_roi_value(roi, "y"),
-        "width": _get_roi_value(roi, "width"),
-        "height": _get_roi_value(roi, "height"),
-    }
+    x, y, w, h = roi
+    region = {"left": int(x), "top": int(y), "width": int(w), "height": int(h)}
 
     with mss.mss() as sct:
         sct_img = sct.grab(region)
 
-    # mss returns image in BGRA format; convert to BGR for OpenCV
+    # MSS returns BGRA; convert to BGR for OpenCV
     img = np.array(sct_img)
     img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-
     return img_bgr
 
+
+def grab_main(cfg) -> np.ndarray:
+    """
+    Grab main game area using MAIN ROI from config.
+
+    Config can be a Config object or a plain dict
+    with structure cfg["ROI"]["MAIN"] = [x, y, w, h].
+    """
+    if hasattr(cfg, "roi_main"):
+        roi = cfg.roi_main()
+    else:
+        roi = tuple(cfg["ROI"]["MAIN"])
+
+    logger.debug("Grabbing MAIN ROI: %s", roi)
+    return capture_roi(roi)
+
+
+def grab_minimap(cfg) -> np.ndarray:
+    """
+    Grab minimap region using MINIMAP ROI from config.
+
+    Config can be a Config object or a plain dict
+    with structure cfg["ROI"]["MINIMAP"] = [x, y, w, h].
+    """
+    if hasattr(cfg, "roi_minimap"):
+        roi = cfg.roi_minimap()
+    else:
+        roi = tuple(cfg["ROI"]["MINIMAP"])
+
+    logger.debug("Grabbing MINIMAP ROI: %s", roi)
+    return capture_roi(roi)
+
+
+# Backwards-compatible helper if needed elsewhere
+def capture_screen(roi_dict):
+    """
+    Backwards-compatible wrapper: roi as dict {x, y, width, height}.
+    """
+    roi = (
+        roi_dict["x"],
+        roi_dict["y"],
+        roi_dict["width"],
+        roi_dict["height"],
+    )
+    return capture_roi(roi)
+
+
+if __name__ == "__main__":
+    from config.config import Config
+
+    cfg = Config()
+    main = grab_main(cfg)
+    mini = grab_minimap(cfg)
+
+    logger.info("Sanity: MAIN frame shape: %s", getattr(main, "shape", None))
+    logger.info("Sanity: MINIMAP frame shape: %s", getattr(mini, "shape", None))

@@ -1,16 +1,27 @@
-﻿{
-  "roi": {
-    "x": 0,
-    "y": 0,
-    "width": 1920,
-    "height": 1080
+{
+  "ROI": {
+    "MAIN": [0, 0, 1920, 1080],
+    "MINIMAP": [1600, 800, 300, 200]
   },
-  "enemy_color_lower_hsv": [0, 100, 100],
-  "enemy_color_upper_hsv": [10, 255, 255],
-  "box_color_lower_hsv": [20, 100, 100],
-  "box_color_upper_hsv": [30, 255, 255],
-  "health_threshold": 30,
-  "loot_key": "F",
-  "shoot_key": "Space",
-  "flee_key": "NumPad0"
+  "HSV": {
+    "enemy_minimap_red_1": [0, 120, 120],
+    "enemy_minimap_red_2": [170, 120, 120],
+    "enemy_minimap_red_1_max": [10, 255, 255],
+    "enemy_minimap_red_2_max": [179, 255, 255],
+    "crate_main_yellow_min": [15, 120, 140],
+    "crate_main_yellow_max": [40, 255, 255]
+  },
+  "keys": {
+    "shoot": "z",
+    "loot": "f",
+    "afterburner": "q",
+    "cloak": "e",
+    "repair": "c",
+    "config1": "1",
+    "config2": "2"
+  },
+  "safety": {
+    "hp_flee_pct": 35,
+    "shield_flee_pct": 25
+  }
 }
