@@ -1,0 +1,16 @@
+﻿{
+  "roi": {
+    "x": 0,
+    "y": 0,
+    "width": 1920,
+    "height": 1080
+  },
+  "enemy_color_lower_hsv": [0, 100, 100],
+  "enemy_color_upper_hsv": [10, 255, 255],
+  "box_color_lower_hsv": [20, 100, 100],
+  "box_color_upper_hsv": [30, 255, 255],
+  "health_threshold": 30,
+  "loot_key": "F",
+  "shoot_key": "Space",
+  "flee_key": "NumPad0"
+}
