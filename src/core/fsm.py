@@ -16,6 +16,7 @@ from config.config import Config
 from controls.input import (
     emergency_stop,
     press_key,
+    human_pause,
 )
 from nav.navigation import approach_enemy, go_to_minimap_point
 from utils.logger import setup_logger
@@ -154,6 +155,9 @@ class Bot:
             shoot_key = self.cfg.keys().get("shoot")
             if shoot_key:
                 press_key(shoot_key)
+        else:
+            # No crates and no enemies on minimap: allow idle-style human pause.
+            human_pause("idle")
 
         if self._hp_low(obs):
             self.logger.info("FARMING: HP low, switching to FLEEING")

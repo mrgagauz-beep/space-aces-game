@@ -24,6 +24,22 @@ logger = logging.getLogger(__name__)
 pyautogui.PAUSE = 0
 EXIT_KEY = "esc"
 
+# Tunable ranges for key/mouse jitter and human-like pauses.
+HUMAN_PAUSE_CONFIG = {
+    # Roughly once every 5–10 minutes, pause a few seconds.
+    "idle": {
+        "interval_range": (5 * 60.0, 10 * 60.0),
+        "sleep_range": (3.0, 12.0),
+    },
+    # Short micro-pauses during combat actions.
+    "combat": {
+        "interval_range": (60.0, 180.0),
+        "sleep_range": (0.2, 0.8),
+    },
+}
+
+_NEXT_HUMAN_PAUSE: dict[str, float] = {}
+
 
 def press_key(key: str, jitter_ms: Tuple[int, int] = (35, 80)) -> None:
     """
@@ -115,3 +131,30 @@ def emergency_stop() -> bool:
 def is_exit_pressed() -> bool:
     """Alias to emergency_stop for older code paths."""
     return emergency_stop()
+
+
+def human_pause(kind: str = "idle") -> None:
+    """
+    Inject occasional human-like pauses.
+
+    For each kind, we schedule the next pause after a random interval and,
+    when due, sleep for a short random duration.
+    """
+    cfg = HUMAN_PAUSE_CONFIG.get(kind, HUMAN_PAUSE_CONFIG["idle"])
+    now = time.monotonic()
+
+    next_due = _NEXT_HUMAN_PAUSE.get(kind)
+    if next_due is None:
+        interval = random.uniform(*cfg["interval_range"])
+        _NEXT_HUMAN_PAUSE[kind] = now + interval
+        return
+
+    if now < next_due:
+        return
+
+    duration = random.uniform(*cfg["sleep_range"])
+    logger.debug("human_pause: kind=%s duration=%.2fs", kind, duration)
+    time.sleep(duration)
+
+    interval = random.uniform(*cfg["interval_range"])
+    _NEXT_HUMAN_PAUSE[kind] = now + interval
