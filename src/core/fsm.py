@@ -11,6 +11,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 import logging
+import csv
+from datetime import datetime
+from pathlib import Path
 
 from config.config import Config
 from controls.input import (
@@ -59,6 +62,57 @@ class Bot:
         self.stats: BotStats = BotStats()
 
         self.logger.info("FSM Bot initialized in state=%s", self.state)
+        self._trace_path = Path("logs") / "trace.csv"
+        self._trace_initialized = False
+
+    # --------- trace logging ---------
+    def logger_stat(self, obs: Dict, action: str, outcome: str = "") -> None:
+        """
+        Append a single RL-friendly trace row to CSV.
+
+        Columns: timestamp, state, enemies_mm, crates_main, mobs_main,
+        action, hp, shield, outcome.
+        """
+        self._trace_path.parent.mkdir(exist_ok=True)
+
+        is_new = not self._trace_path.exists()
+        with self._trace_path.open("a", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            if is_new:
+                writer.writerow(
+                    [
+                        "timestamp",
+                        "state",
+                        "enemies_mm",
+                        "crates_main",
+                        "mobs_main",
+                        "action",
+                        "hp",
+                        "shield",
+                        "outcome",
+                    ]
+                )
+
+            ts = datetime.utcnow().isoformat()
+            enemies_mm = len(obs.get("enemies_mm", []))
+            crates_main = len(obs.get("crates", []))
+            mobs_main = len(obs.get("mobs_main", []))
+            hp = obs.get("hp_pct", 0)
+            shield = obs.get("shield_pct", 0)
+
+            writer.writerow(
+                [
+                    ts,
+                    self.state,
+                    enemies_mm,
+                    crates_main,
+                    mobs_main,
+                    action,
+                    hp,
+                    shield,
+                    outcome,
+                ]
+            )
 
     # --------- sensing ---------
     def _sense(self) -> Dict:
@@ -139,6 +193,7 @@ class Bot:
             mx, my, _, _ = self.cfg.roi_main()
             move_click_abs(mx + cx, my + cy)
             self.stats.boxes += 1
+            self.logger_stat(obs, action="collect_crate", outcome="ok")
 
         elif enemies_mm and me_mm is not None:
             enemy = enemies_mm[0]
@@ -155,12 +210,14 @@ class Bot:
             shoot_key = self.cfg.keys().get("shoot")
             if shoot_key:
                 press_key(shoot_key)
+            self.logger_stat(obs, action="engage_enemy", outcome="shot")
         else:
             # No crates and no enemies on minimap: allow idle-style human pause.
             human_pause("idle")
 
         if self._hp_low(obs):
             self.logger.info("FARMING: HP low, switching to FLEEING")
+            self.logger_stat(obs, action="hp_low", outcome="to_fleeing")
             self.state = BotState.FLEEING
 
     def _act_fleeing(self, obs: Dict) -> None:
@@ -185,6 +242,7 @@ class Bot:
 
         # TODO: navigate to nearest portal using templates/vision.
         self.logger.info("FLEEING: macro done, entering SAFE")
+        self.logger_stat(obs, action="flee_macro", outcome="to_safe")
         self.state = BotState.SAFE
 
     def _act_safe(self, obs: Dict) -> None:
@@ -194,6 +252,7 @@ class Bot:
         self.logger.info("SAFE: cooldown start")
         time.sleep(3.0)
         self.logger.info("SAFE: returning to FARMING")
+        self.logger_stat(obs, action="cooldown", outcome="to_farming")
         self.state = BotState.FARMING
 
     # --------- main loop ---------
