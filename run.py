@@ -31,6 +31,20 @@ def run_test_mode() -> None:
 
     logger.info("Test mode: starting visual debug loop")
 
+    # Create named windows and move them outside the capture ROI to avoid recursion
+    window_main = "Space Aces MAIN (crates/mobs/labels)"
+    window_minimap = "Space Aces MINIMAP (player/enemies)"
+
+    cv2.namedWindow(window_main, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(window_minimap, cv2.WINDOW_NORMAL)
+
+    # Move windows to safe position (bottom right, outside typical game area)
+    # Adjust these coordinates if they still conflict with your game window
+    cv2.moveWindow(window_main, 2000, 100)
+    cv2.moveWindow(window_minimap, 2000, 700)
+
+    logger.info("OpenCV windows positioned at x=2000 to avoid capture recursion")
+
     while True:
         main_bgr = capture.grab_main(cfg)
         minimap_bgr = capture.grab_minimap(cfg)
@@ -72,8 +86,17 @@ def run_test_mode() -> None:
             px, py = player_mm
             cv2.circle(mm_vis, (px, py), 4, (255, 255, 0), -1)
 
-        cv2.imshow("Space Aces MAIN (crates/mobs/labels)", main_vis)
-        cv2.imshow("Space Aces MINIMAP (player/enemies)", mm_vis)
+        # Add info overlay to main screen
+        info_text = f"Crates: {len(crates)} | Mobs: {len(mobs)} | Labels: {len(labels)}"
+        cv2.putText(main_vis, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(main_vis, "Press ESC or Q to exit", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        # Add info overlay to minimap
+        mm_info = f"Enemies: {len(enemies_mm)} | Player: {'Yes' if player_mm else 'No'}"
+        cv2.putText(mm_vis, mm_info, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        cv2.imshow(window_main, main_vis)
+        cv2.imshow(window_minimap, mm_vis)
 
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):
