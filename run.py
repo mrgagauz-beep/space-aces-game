@@ -2,6 +2,7 @@ import argparse
 import logging
 import pathlib
 import sys
+import time
 
 import cv2
 import numpy as np
@@ -45,7 +46,16 @@ def run_test_mode() -> None:
 
     logger.info("OpenCV windows positioned at x=2000 to avoid capture recursion")
 
+    # FPS limiter to avoid excessive CPU usage and window flickering
+    target_fps = 30
+    frame_delay = 1.0 / target_fps
+    fps_display = 0.0
+    last_fps_update = time.time()
+    frame_count = 0
+
     while True:
+        frame_start = time.time()
+
         main_bgr = capture.grab_main(cfg)
         minimap_bgr = capture.grab_minimap(cfg)
 
@@ -86,8 +96,15 @@ def run_test_mode() -> None:
             px, py = player_mm
             cv2.circle(mm_vis, (px, py), 4, (255, 255, 0), -1)
 
+        # Calculate FPS
+        frame_count += 1
+        if time.time() - last_fps_update >= 1.0:
+            fps_display = frame_count / (time.time() - last_fps_update)
+            frame_count = 0
+            last_fps_update = time.time()
+
         # Add info overlay to main screen
-        info_text = f"Crates: {len(crates)} | Mobs: {len(mobs)} | Labels: {len(labels)}"
+        info_text = f"Crates: {len(crates)} | Mobs: {len(mobs)} | Labels: {len(labels)} | FPS: {fps_display:.1f}"
         cv2.putText(main_vis, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(main_vis, "Press ESC or Q to exit", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
@@ -98,9 +115,17 @@ def run_test_mode() -> None:
         cv2.imshow(window_main, main_vis)
         cv2.imshow(window_minimap, mm_vis)
 
-        key = cv2.waitKey(1) & 0xFF
+        # Handle keyboard input with proper delay
+        # waitKey with higher value prevents window spam and reduces CPU usage
+        key = cv2.waitKey(30) & 0xFF
         if key in (27, ord("q")):
+            logger.info("Exit key pressed")
             break
+
+        # FPS limiter: sleep if we processed frame too fast
+        elapsed = time.time() - frame_start
+        if elapsed < frame_delay:
+            time.sleep(frame_delay - elapsed)
 
     cv2.destroyAllWindows()
     logger.info("Test mode: finished")
