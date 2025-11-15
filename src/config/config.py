@@ -7,7 +7,10 @@ key bindings and safety settings from JSON profiles.
 
 from pathlib import Path
 
-import ujson as json
+try:
+    import ujson as json
+except ImportError:  # fallback if ujson is not installed
+    import json
 
 
 class Config:
@@ -47,3 +50,19 @@ class Config:
     def safety(self) -> dict:
         """Return safety thresholds dictionary."""
         return self.data.get("safety", {})
+
+    def mobs_main_detector(self) -> dict:
+        """Return config block for main-screen mob detector."""
+        return self.data.get("mobs_main_detector", {})
+
+    def minimap_inner_margin_pct(self) -> dict:
+        """Return inner margins (in percent) for the minimap ROI."""
+        return self.data.get("minimap_inner_margin_pct", {})
+
+    def minimap_enemy_detector(self) -> dict:
+        """Return config block for enemy detection on the minimap."""
+        return self.data.get("minimap_enemy_detector", {})
+
+    def mob_name_detector_main(self) -> dict:
+        """Return config block for main-screen mob name detector."""
+        return self.data.get("mob_name_detector_main", {})

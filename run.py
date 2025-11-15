@@ -1,91 +1,128 @@
 import argparse
+import logging
+import pathlib
+import sys
 
 import cv2
+import numpy as np
+
+# Ensure that `src` is on sys.path so that `config`, `vision`, etc. can be imported
+ROOT_DIR = pathlib.Path(__file__).resolve().parent
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from config.config import Config
 from core.fsm import Bot
 from utils.logger import setup_logger
 from vision import capture, minimap, screen
+from vision.screen import find_mob_labels_main, mob_label_box_to_click_point
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Space Aces Bot launcher")
-    parser.add_argument(
-        "--mode",
-        choices=["calibrate", "test", "bot"],
-        default="bot",
-        help="Run mode: calibrate ROI, test vision, or start bot",
-    )
-    return parser.parse_args()
-
-
-def run_calibration():
-    from tools import calibrate_roi
-
-    calibrate_roi.main()
-
-
-def run_test():
+def run_test_mode() -> None:
+    """
+    Visual test mode:
+    - захватывает MAIN и MINIMAP;
+    - детектирует ящики, мобов, подписи мобов и врагов на миникарте;
+    - рисует оверлеи и показывает окна OpenCV до нажатия Esc / q.
+    """
     logger = setup_logger()
     cfg = Config()
 
-    main_frame = capture.grab_main(cfg)
-    mini_frame = capture.grab_minimap(cfg)
+    logger.info("Test mode: starting visual debug loop")
 
-    if main_frame is None or main_frame.size == 0:
-        logger.error("No MAIN frame captured for test mode")
-        return
-    if mini_frame is None or mini_frame.size == 0:
-        logger.error("No MINIMAP frame captured for test mode")
-        return
+    while True:
+        main_bgr = capture.grab_main(cfg)
+        minimap_bgr = capture.grab_minimap(cfg)
 
-    crates = screen.find_crates_main(main_frame, cfg)
-    mobs = screen.find_mobs_main(main_frame)
-    enemies_mm = minimap.find_enemies(mini_frame, cfg)
-    player_mm = minimap.find_player_crosshair(mini_frame)
+        if main_bgr is None or minimap_bgr is None:
+            logger.error("Failed to grab frames from screen")
+            break
 
-    vis_main = main_frame.copy()
-    vis_mm = mini_frame.copy()
+        crates = screen.find_crates_main(main_bgr, cfg)
+        mobs = screen.find_mobs_main(main_bgr, cfg)
+        labels = find_mob_labels_main(main_bgr, cfg)
 
-    for x, y, w, h in crates:
-        cv2.rectangle(vis_main, (x, y), (x + w, y + h), (0, 255, 255), 2)
-    for x, y, w, h in mobs:
-        cv2.rectangle(vis_main, (x, y), (x + w, y + h), (0, 0, 255), 1)
+        enemies_mm = minimap.find_enemies(minimap_bgr, cfg)
+        player_mm = minimap.find_player_crosshair(minimap_bgr, cfg)
 
-    for ex, ey in enemies_mm:
-        cv2.circle(vis_mm, (ex, ey), 3, (0, 0, 255), -1)
-    if player_mm is not None:
-        cv2.circle(vis_mm, player_mm, 4, (255, 255, 0), -1)
+        main_vis = main_bgr.copy()
+        mm_vis = minimap_bgr.copy()
 
-    logger.info(
-        "Test mode: crates=%d mobs=%d enemies_mm=%d player_mm=%s",
-        len(crates),
-        len(mobs),
-        len(enemies_mm),
-        player_mm,
+        # Draw crates (yellow)
+        for (x, y, w, h) in crates:
+            cv2.rectangle(main_vis, (x, y), (x + w, y + h), (0, 255, 255), 2)
+
+        # Draw mobs (red)
+        for (x, y, w, h) in mobs:
+            cv2.rectangle(main_vis, (x, y), (x + w, y + h), (0, 0, 255), 2)
+
+        # Draw mob labels (magenta) and click points (cyan)
+        for (x, y, w, h) in labels:
+            cv2.rectangle(main_vis, (x, y), (x + w, y + h), (255, 0, 255), 1)
+            cx, cy = mob_label_box_to_click_point((x, y, w, h), cfg)
+            cv2.circle(main_vis, (cx, cy), 3, (255, 255, 0), -1)
+
+        # Draw enemies on minimap (red dots)
+        for (ex, ey) in enemies_mm:
+            cv2.circle(mm_vis, (ex, ey), 3, (0, 0, 255), -1)
+
+        # Draw player on minimap (cyan dot)
+        if player_mm is not None:
+            px, py = player_mm
+            cv2.circle(mm_vis, (px, py), 4, (255, 255, 0), -1)
+
+        cv2.imshow("Space Aces MAIN (crates/mobs/labels)", main_vis)
+        cv2.imshow("Space Aces MINIMAP (player/enemies)", mm_vis)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key in (27, ord("q")):
+            break
+
+    cv2.destroyAllWindows()
+    logger.info("Test mode: finished")
+
+
+def run_bot_mode() -> None:
+    """
+    Production bot mode: starts FSM loop.
+    """
+    logger = setup_logger()
+    cfg = Config()
+    bot = Bot(cfg)
+    logger.info("Bot mode: starting FSM loop")
+    bot.run()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        choices=["test", "bot"],
+        default="test",
+        help="Режим работы бота: test или bot",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    cv2.imshow("Space Aces MAIN (crates/mobs)", vis_main)
-    cv2.imshow("Space Aces MINIMAP (player/enemies)", vis_mm)
-    print("Press any key in an image window to close...")
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    logger = logging.getLogger("space_aces")
+    logger.info("run.py started with mode=%s", args.mode)
 
-
-def run_bot():
-    setup_logger()
-    bot = Bot()
     try:
-        bot.run()
-    except KeyboardInterrupt:
-        print("Bot stopped by user (KeyboardInterrupt).")
+        if args.mode == "test":
+            run_test_mode()
+        else:
+            run_bot_mode()
+    except Exception:
+        logger.exception("Fatal error in main()")
+        raise
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    if args.mode == "calibrate":
-        run_calibration()
-    elif args.mode == "test":
-        run_test()
-    else:
-        run_bot()
+    main()
+

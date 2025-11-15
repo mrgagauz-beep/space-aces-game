@@ -57,9 +57,9 @@ def main():
 
         t0 = time.perf_counter()
         crates = screen.find_crates_main(main_bgr, cfg)
-        mobs = screen.find_mobs_main(main_bgr)
+        mobs = screen.find_mobs_main(main_bgr, cfg)
         enemies_mm = minimap.find_enemies(mm_bgr, cfg)
-        player_mm = minimap.find_player_crosshair(mm_bgr)
+        player_mm = minimap.find_player_crosshair(mm_bgr, cfg)
         dt = time.perf_counter() - t0
 
         total_frames += 1
@@ -94,4 +94,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

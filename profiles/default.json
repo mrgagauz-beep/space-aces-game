@@ -1,15 +1,99 @@
 {
   "ROI": {
-    "MAIN": [0, 0, 1920, 1080],
-    "MINIMAP": [1600, 800, 300, 200]
+    "MAIN": [
+      0,
+      0,
+      1916,
+      1027
+    ],
+    "MINIMAP": [
+      1472,
+      728,
+      362,
+      218
+    ]
   },
   "HSV": {
-    "enemy_minimap_red_1": [0, 120, 120],
-    "enemy_minimap_red_2": [170, 120, 120],
-    "enemy_minimap_red_1_max": [10, 255, 255],
-    "enemy_minimap_red_2_max": [179, 255, 255],
-    "crate_main_yellow_min": [15, 120, 140],
-    "crate_main_yellow_max": [40, 255, 255]
+    "enemy_minimap_red_1_min": [
+      0,
+      102,
+      64
+    ],
+    "enemy_minimap_red_1_max": [
+      8,
+      255,
+      255
+    ],
+    "enemy_minimap_red_2_min": [
+      170,
+      102,
+      64
+    ],
+    "enemy_minimap_red_2_max": [
+      179,
+      255,
+      255
+    ],
+    "mob_name_red_1_min": [
+      0,
+      40,
+      40
+    ],
+    "mob_name_red_1_max": [
+      15,
+      255,
+      255
+    ],
+    "mob_name_red_2_min": [
+      165,
+      40,
+      40
+    ],
+    "mob_name_red_2_max": [
+      179,
+      255,
+      255
+    ],
+    "mob_main_blue_min": [
+      80,
+      80,
+      110
+    ],
+    "mob_main_blue_max": [
+      120,
+      255,
+      255
+    ],
+    "player_minimap_line_1_min": [
+      80,
+      40,
+      140
+    ],
+    "player_minimap_line_1_max": [
+      110,
+      255,
+      255
+    ],
+    "player_minimap_line_2_min": [
+      0,
+      0,
+      180
+    ],
+    "player_minimap_line_2_max": [
+      179,
+      60,
+      255
+    ],
+    "crate_main_yellow_min": [
+      15,
+      120,
+      140
+    ],
+    "crate_main_yellow_max": [
+      40,
+      255,
+      255
+    ]
   },
   "keys": {
     "shoot": "z",
@@ -23,5 +107,55 @@
   "safety": {
     "hp_flee_pct": 35,
     "shield_flee_pct": 25
+  },
+  "minimap_inner_margin_pct": {
+    "top": 0.22,
+    "bottom": 0.12,
+    "left": 0.15,
+    "right": 0.05
+  },
+  "mobs_main_detector": {
+    "play_area_margin_pct": {
+      "top": 0.18,
+      "bottom": 0.18,
+      "left": 0.10,
+      "right": 0.25
+    },
+    "min_area": 120,
+    "max_area": 3000,
+    "min_aspect_ratio": 0.5,
+    "max_aspect_ratio": 2.0
+  },
+  "mob_name_detector_main": {
+    "play_area_margin_pct": {
+      "top": 0.12,
+      "bottom": 0.25,
+      "left": 0.05,
+      "right": 0.20
+    },
+    "area_min": 20,
+    "area_max": 20000,
+    "width_min": 10,
+    "width_max": 600,
+    "height_min": 5,
+    "height_max": 80,
+    "min_aspect_ratio": 1.5,
+    "max_aspect_ratio": 25.0,
+    "click_offset_factor": 0.9
+  },
+  "minimap_enemy_detector": {
+    "area_min": 3,
+    "area_max": 500,
+    "bbox_min": 2,
+    "bbox_max": 25,
+    "border_margin": 3,
+    "ignore_regions": {
+      "1-1": [
+        0,
+        0,
+        120,
+        120
+      ]
+    }
   }
 }

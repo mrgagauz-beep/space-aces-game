@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import logging
 import csv
 from datetime import datetime
@@ -20,10 +20,12 @@ from controls.input import (
     emergency_stop,
     press_key,
     human_pause,
+    move_click_abs,
 )
-from nav.navigation import approach_enemy, go_to_minimap_point
+from nav.navigation import compute_approach_point, go_to_minimap_point
 from utils.logger import setup_logger
 from vision import capture, minimap, screen
+from vision.screen import find_mob_labels_main, mob_label_box_to_click_point
 
 
 class BotState:
@@ -64,6 +66,47 @@ class Bot:
         self.logger.info("FSM Bot initialized in state=%s", self.state)
         self._trace_path = Path("logs") / "trace.csv"
         self._trace_initialized = False
+
+        # Target tracking on the minimap
+        self.current_target_mm: Optional[Tuple[int, int]] = None
+        self.current_stage: Optional[str] = None  # "approach" / "engage" / None
+        # Last known player position on minimap (for smoothing crosshair detection)
+        self.last_player_mm: Optional[Tuple[int, int]] = None
+
+    def _choose_ammo_for_map(self, map_name: str | None = None) -> Optional[str]:
+        """
+        Choose ammo key based on current map.
+
+        For now this is a simple wrapper around the generic shoot key.
+        """
+        keys = self.cfg.keys()
+        return keys.get("shoot")
+
+    def _pick_closest_enemy_mm(
+        self, enemies_mm: List[Tuple[int, int]], player_mm: Optional[Tuple[int, int]]
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Выбирает ближайшего врага на миникарте относительно позиции игрока.
+
+        enemies_mm: список (x, y)
+        player_mm: (px, py)
+        """
+        if not enemies_mm or player_mm is None:
+            return None
+
+        px, py = player_mm
+        best: Optional[Tuple[int, int]] = None
+        best_d2: Optional[float] = None
+
+        for ex, ey in enemies_mm:
+            dx = ex - px
+            dy = ey - py
+            d2 = dx * dx + dy * dy
+            if best is None or best_d2 is None or d2 < best_d2:
+                best = (ex, ey)
+                best_d2 = d2
+
+        return best
 
     # --------- trace logging ---------
     def logger_stat(self, obs: Dict, action: str, outcome: str = "") -> None:
@@ -128,9 +171,13 @@ class Bot:
         frame_mm = capture.grab_minimap(self.cfg)
 
         enemies_mm = minimap.find_enemies(frame_mm, self.cfg)
-        me_mm = minimap.find_player_crosshair(frame_mm)
+        me_mm = minimap.find_player_crosshair(frame_mm, self.cfg)
+        if me_mm is not None:
+            self.last_player_mm = me_mm
+        else:
+            me_mm = self.last_player_mm
 
-        mobs_main = screen.find_mobs_main(frame_main)
+        mobs_main = screen.find_mobs_main(frame_main, self.cfg)
         crates = screen.find_crates_main(frame_main, self.cfg)
 
         # TODO: hook actual HP/shield parsing from UI.
@@ -179,40 +226,133 @@ class Bot:
         - Switch to FLEEING if HP/shield low.
         """
         crates: List[Tuple[int, int, int, int]] = obs["crates"]
-        enemies_mm: List[Tuple[int, int]] = obs["enemies_mm"]
-        me_mm = obs["me_mm"]
+
+        # Fresh minimap observations for decision making
+        mm_frame = capture.grab_minimap(self.cfg)
+        enemies_mm: List[Tuple[int, int]] = minimap.find_enemies(
+            mm_frame, self.cfg, map_name=None
+        )
+        player_mm_raw = minimap.find_player_crosshair(mm_frame, self.cfg)
+        if player_mm_raw is not None:
+            self.last_player_mm = player_mm_raw
+        player_mm = self.last_player_mm
+
+        # Reset target if there are no enemies
+        if not enemies_mm:
+            if self.current_target_mm is not None or self.current_stage is not None:
+                self.logger.debug("FARMING: no enemies on minimap, reset target")
+            self.current_target_mm = None
+            self.current_stage = None
 
         if crates:
             x, y, w, h = crates[0]
             cx, cy = x + w // 2, y + h // 2
             self.logger.info("FARMING: collecting crate at (%d,%d)", cx, cy)
             # Click directly in main screen absolute coords
-            from controls.input import move_click_abs
-
-            # ROI MAIN gives top-left corner of main area
             mx, my, _, _ = self.cfg.roi_main()
             move_click_abs(mx + cx, my + cy)
             self.stats.boxes += 1
             self.logger_stat(obs, action="collect_crate", outcome="ok")
 
-        elif enemies_mm and me_mm is not None:
-            enemy = enemies_mm[0]
-            target = approach_enemy(self.cfg.roi_minimap(), me_mm, enemy, factor=0.8)
+        # Target acquisition on minimap
+        if self.current_target_mm is None:
+            target = self._pick_closest_enemy_mm(enemies_mm, player_mm)
+            if target is not None:
+                self.current_target_mm = target
+                self.current_stage = "approach"
+                self.logger.info("FARMING: picked target_mm=%s", target)
 
-            self.logger.info("FARMING: approaching enemy %s via %s", enemy, target)
+        # Approach stage: fly towards the selected enemy
+        if self.current_stage == "approach" and self.current_target_mm is not None:
+            if player_mm is None:
+                self.logger.debug(
+                    "FARMING: no player position on minimap, cannot approach"
+                )
+            else:
+                enemy = self.current_target_mm
+                click_xy = compute_approach_point(player_mm, enemy, factor=0.8)
+                self.logger.info(
+                    "FARMING: approach target_mm=%s via %s", enemy, click_xy
+                )
 
-            def poll_frame():
-                return capture.grab_main(self.cfg)
+                success = go_to_minimap_point(
+                    self.cfg.roi_minimap(),
+                    click_xy,
+                    self.cfg,
+                    grab_minimap_fn=lambda: capture.grab_minimap(self.cfg),
+                    find_player_fn=minimap.find_player_crosshair,
+                    timeout=8.0,
+                )
+                self.logger.info(
+                    "FARMING: approach target_mm=%s success=%s",
+                    enemy,
+                    success,
+                )
+                self.current_stage = "engage"
+                return
 
-            # NOTE: we use main grab for now; later can switch to full-screen.
-            go_to_minimap_point(self.cfg.roi_minimap(), target, poll_frame)
+        # Engage stage: lock and shoot using labels on main screen
+        if self.current_stage == "engage" and self.current_target_mm is not None:
+            main_bgr = capture.grab_main(self.cfg)
+            labels = find_mob_labels_main(main_bgr, self.cfg)
+            if labels:
+                h, w = main_bgr.shape[:2]
+                cx_screen = w // 2
+                cy_screen = h // 2
 
+                def _center(box):
+                    x, y, bw, bh = box
+                    return x + bw // 2, y + bh // 2
+
+                best_box = None
+                best_d2 = None
+                for box in labels:
+                    cx, cy = _center(box)
+                    dx = cx - cx_screen
+                    dy = cy - cy_screen
+                    d2 = dx * dx + dy * dy
+                    if best_box is None or best_d2 is None or d2 < best_d2:
+                        best_box = box
+                        best_d2 = d2
+
+                if best_box is not None:
+                    click_x, click_y = mob_label_box_to_click_point(
+                        best_box, self.cfg
+                    )
+                    move_click_abs(click_x, click_y)
+
+                    ammo_key = self._choose_ammo_for_map()
+                    if ammo_key:
+                        press_key(ammo_key)
+                        self.logger.info(
+                            "FARMING: lock target via label at (%d,%d), ammo=%s",
+                            click_x,
+                            click_y,
+                            ammo_key,
+                        )
+                        self.logger_stat(
+                            obs,
+                            action="lock_via_label",
+                            outcome=f"ammo:{ammo_key}",
+                        )
+                    else:
+                        self.logger.info(
+                            "FARMING: lock target via label at (%d,%d), no ammo key",
+                            click_x,
+                            click_y,
+                        )
+                    # After engage, reset target to allow new decisions
+                    self.current_target_mm = None
+                    self.current_stage = None
+                    return
+
+            # Fallback: simple shoot if no labels are visible
             shoot_key = self.cfg.keys().get("shoot")
             if shoot_key:
                 press_key(shoot_key)
             self.logger_stat(obs, action="engage_enemy", outcome="shot")
-        else:
-            # No crates and no enemies on minimap: allow idle-style human pause.
+        elif not crates and not enemies_mm:
+            # No crates and no enemies: allow idle-style human pause.
             human_pause("idle")
 
         if self._hp_low(obs):

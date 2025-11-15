@@ -18,7 +18,7 @@ from vision.capture import grab_minimap
 setup_logger()
 logger = logging.getLogger(__name__)
 
-# Last known player position on minimap (in minimap ROI coordinates).
+# Последняя удачная позиция игрока на миникарте (в координатах ROI миникарты).
 _LAST_PLAYER_MM: Optional[Tuple[int, int]] = None
 
 
@@ -26,12 +26,11 @@ def _extract_inner_minimap(
     minimap_bgr: np.ndarray, cfg: Optional[Config] = None
 ) -> Tuple[Optional[np.ndarray], int, int]:
     """
-    Cut out inner part of minimap (without frame, header and scales) using
-    percentage margins from cfg.minimap_inner_margin_pct().
+    Вырезает внутреннюю часть миникарты по процентным отступам из профиля.
 
-    Returns a tuple (inner_bgr, x0, y0) where inner_bgr is the cropped
-    minimap region, and (x0, y0) is the top-left offset in the original
-    minimap ROI coordinates.
+    Использует cfg.minimap_inner_margin_pct(), если он есть; иначе берёт
+    разумные значения по умолчанию. Возвращает подкадр и смещение по X/Y
+    относительно исходного ROI миникарты.
     """
     if minimap_bgr is None or minimap_bgr.size == 0:
         return None, 0, 0
@@ -57,32 +56,31 @@ def _extract_inner_minimap(
     return inner, x0, y0
 
 
-def find_player_crosshair(minimap_bgr, cfg=None):
+def find_player_crosshair(
+    minimap_bgr: np.ndarray, cfg: Optional[Config] = None
+) -> Optional[Tuple[int, int]]:
     """
-    Находит позицию игрока по перекрёстку на миникарте.
+    Находит позицию игрока по пересечению вертикальной и горизонтальной циановой/белой линии
+    во внутренней части миникарты.
 
-    Логика:
-    1. Берём внутреннюю часть миникарты (_extract_inner_minimap), чтобы убрать рамку и заголовок.
-    2. В HSV ищем циановые/белые линии (перекрёст).
-    3. Строим маску, считаем суммы по строкам и столбцам, берём максимумы — это линии.
-    4. Если HSV не дал результата — fallback на обычный threshold по яркости (grayscale).
-    5. Если и тогда ничего — возвращаем последнюю удачную позицию, если она есть.
-    6. Возвращаем координаты в системе ROI миникарты (x, y).
+    1) Строит HSV-маску линий.
+    2) Считает суммы по столбцам и строкам.
+    3) Берёт максимум по каждой оси.
+
+    Если в кадре линии плохо видны, возвращает последнюю удачную позицию.
+    Координаты — в системе ROI миникарты (x, y).
     """
-
     global _LAST_PLAYER_MM
 
-    # 1. Вырезаем внутреннюю область миникарты
     inner, x0, y0 = _extract_inner_minimap(minimap_bgr, cfg)
     if inner is None or inner.size == 0:
         return _LAST_PLAYER_MM
 
     h, w = inner.shape[:2]
-    _ = (h, w)  # переменная для удобной отладки
+    _ = (h, w)  # для удобства отладки, чтобы линтер не ругался
 
-    # 2. Пробуем по HSV (циан + белый)
     hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
-    hsv_cfg = cfg.hsv() if hasattr(cfg, "hsv") else {}
+    hsv_cfg = cfg.hsv() if cfg is not None and hasattr(cfg, "hsv") else {}
 
     line1_min = np.array(
         hsv_cfg.get("player_minimap_line_1_min", [75, 40, 120]), dtype=np.uint8
@@ -105,19 +103,12 @@ def find_player_crosshair(minimap_bgr, cfg=None):
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
 
+    # суммарная "яркость" по столбцам и строкам
     col_sum = mask.sum(axis=0).astype(np.float32)
     row_sum = mask.sum(axis=1).astype(np.float32)
 
-    # 3. Если HSV-маска пустая, fallback на grayscale
-    if col_sum.max() == 0 or row_sum.max() == 0:
-        gray = cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY)
-        # Порог опускаем до 120, чтобы захватить не очень яркие линии
-        _, thr = cv2.threshold(gray, 120, 255, cv2.THRESH_BINARY)
-        col_sum = thr.sum(axis=0).astype(np.float32)
-        row_sum = thr.sum(axis=1).astype(np.float32)
-
-    # 4. Если вообще ничего не нашли — возвращаем последнюю известную позицию
-    if col_sum.max() == 0 or row_sum.max() == 0:
+    # если маска почти пустая — fallback к прошлой позиции или None
+    if col_sum.max() < 1.0 or row_sum.max() < 1.0:
         return _LAST_PLAYER_MM
 
     vert_x = int(np.argmax(col_sum))
@@ -214,4 +205,5 @@ if __name__ == "__main__":
     enemies = find_enemies(minimap_frame, cfg)
 
     logger.info("Sanity minimap: player=%s, enemies=%d", player, len(enemies))
+
 
