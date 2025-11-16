@@ -1,0 +1,7 @@
+# Space Aces  Handoff Context (v1)
+## Snapshot (кратко)
+Цель: бот через CV + minimap. Приоритет: ROI/minimap → player_mm → FARMING подлёт 80% → FLEE/SAFE (COOLDOWN позже).
+## Последние итерации
+Итерация 0  Bootstrap (docs/ и навигация заведены).
+## Инструкции
+В новом чате вставь этот файл первым сообщением. Работай микрошагами, проси логи и self-test.

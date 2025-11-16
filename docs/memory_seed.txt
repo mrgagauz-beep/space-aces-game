@@ -1,0 +1,4 @@
+Запомни: Space Aces — бот через CV + minimap, работаем короткими задачами; код/правки — через Codex; логирование и self-test обязательны.
+Запомни: Архитектура — vision, navigation, FSM(FARMING,FLEEING,SAFE, позже COOLDOWN), controls, utils, config; публичные интерфейсы не ломаем.
+Запомни: Приоритет — ROI/minimap → стабильный player_mm → FARMING подлёт 80% → FLEE/SAFE → cooldown.
+Запомни: Формат ответов — план → изменения → как проверить → риски; если не хватает артефактов — спроси, что приложить.
