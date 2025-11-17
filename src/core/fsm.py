@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 import random
 
+from enum import Enum
+
 from config.config import Config
 from controls.input import (
     emergency_stop,
@@ -39,6 +41,12 @@ class BotState:
     FARMING = "FARMING"
     FLEEING = "FLEEING"
     SAFE = "SAFE"
+
+
+class FarmPhase(str, Enum):
+    SEARCH = "search"
+    APPROACH_MM = "approach_mm"
+    ENGAGE_MAIN = "engage_main"
 
 
 @dataclass
@@ -74,7 +82,10 @@ class Bot:
 
         # Target tracking on the minimap
         self.current_target_mm: Optional[Tuple[int, int]] = None
-        self.current_stage: Optional[str] = None  # "approach" / "engage" / None
+        # Legacy string stage ("approach"/"engage"), kept for backward logs.
+        self.current_stage: Optional[str] = None
+        # Structured farming phase state.
+        self.farm_phase: FarmPhase = FarmPhase.SEARCH
         # Target tracking on the main screen (click point in MAIN-local coords)
         self.current_target_main: Optional[Tuple[float, float]] = None
         # Last known player position on minimap (for smoothing crosshair detection)
@@ -85,6 +96,7 @@ class Bot:
         self._last_world_click_ts: float = 0.0
         self.fire_started_for_target: bool = False
         self.engage_click_attempts: int = 0
+        self.target_last_seen_main_ts: float = 0.0
 
         farming_cfg = self.cfg.farming() if hasattr(self.cfg, "farming") else {}
         # Maximum number of ENGAGE click-burst attempts per target.
@@ -107,6 +119,10 @@ class Bot:
             else int(farming_cfg.get("main_focus_timeout_ticks", 15))
         )
         self.farming_no_main_ticks: int = 0
+        # How long (ms) to tolerate missing MAIN target before resetting.
+        self.farm_main_lost_timeout_ms: int = int(
+            farming_cfg.get("main_lost_timeout_ms", 800)
+        )
 
     def _choose_ammo_for_map(self, map_name: str | None = None) -> Optional[str]:
         """
