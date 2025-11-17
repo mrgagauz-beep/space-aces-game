@@ -147,7 +147,15 @@
     "ship_width_px": 140.0,
     "ship_height_px": 90.0,
     "name_to_ship_offset_px": 18.0,
-    "name_to_ship_offset_up_px": 18.0
+    "name_to_ship_offset_up_px": 18.0,
+    "ship_search_margin_x_k": 0.35,
+    "ship_search_height_up_k": 3.0,
+    "ship_search_offset_up_px": 5.0,
+    "ship_blob_threshold": 170,
+    "ship_blob_min_area_px": 50,
+    "ship_blob_max_area_px": 5000,
+    "ship_min_width_px": 10,
+    "ship_min_height_px": 10
   },
   "minimap_enemy_detector": {
     "area_min": 3,

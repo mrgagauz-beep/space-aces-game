@@ -319,20 +319,27 @@ def mob_label_box_to_click_point(
     return cx, cy
 
 
-def infer_ship_bbox_from_name_bbox(name_bbox: BBox, cfg) -> BBox:
+def _safe_float(d: dict, key: str, default: float) -> float:
+    try:
+        value = float(d.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return value
+
+
+def _safe_int(d: dict, key: str, default: int) -> int:
+    try:
+        value = int(d.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(0, value)
+
+
+def _infer_ship_bbox_geometry_from_name_bbox(name_bbox: BBox, cfg) -> BBox:
     """
-    Infer an approximate ship bbox on MAIN from a mob name bbox.
+    Geometric fallback: approximate ship bbox above the name label.
 
-    The heuristic assumes that the ship is located slightly above the name
-    label and roughly centered horizontally over it. Geometry is controlled
-    by the ``mob_name_detector_main`` config block:
-
-    - ``ship_width_px``
-    - ``ship_height_px``
-    - ``name_to_ship_offset_up_px`` (or legacy ``name_to_ship_offset_px``)
-
-    All values are in MAIN pixels. Reasonable defaults are used if the fields
-    are missing or invalid.
+    Uses fixed width/height and vertical offset from ``mob_name_detector_main``.
     """
     nx1, ny1, nx2, ny2 = name_bbox
     name_w = max(1.0, float(nx2 - nx1))
@@ -345,14 +352,6 @@ def infer_ship_bbox_from_name_bbox(name_bbox: BBox, cfg) -> BBox:
         else {}
     )
 
-    def _safe_float(d: dict, key: str, default: float) -> float:
-        try:
-            value = float(d.get(key, default))
-        except (TypeError, ValueError):
-            value = default
-        return value
-
-    # Fallbacks use simple multiples of the name label size.
     ship_w = _safe_float(nd, "ship_width_px", max(name_w * 2.5, 80.0))
     ship_h = _safe_float(nd, "ship_height_px", max(name_h * 2.0, 40.0))
     offset_legacy = _safe_float(
@@ -372,6 +371,136 @@ def infer_ship_bbox_from_name_bbox(name_bbox: BBox, cfg) -> BBox:
     sy1 = sy2 - ship_h
 
     return (sx1, sy1, sx2, sy2)
+
+
+def _infer_ship_bbox_blob_from_name_bbox(
+    frame_bgr: np.ndarray,
+    name_bbox: BBox,
+    cfg,
+) -> Optional[BBox]:
+    """
+    Try to infer ship bbox as the largest bright blob above the name label.
+
+    The search window is defined relative to the name bbox and tuned via
+    ``mob_name_detector_main`` config parameters.
+
+    Returns
+    -------
+    Optional[BBox]
+        Ship bbox in MAIN coordinates, or None if a reliable blob was not found.
+    """
+    if frame_bgr is None or frame_bgr.size == 0:
+        return None
+
+    h_frame, w_frame = frame_bgr.shape[:2]
+
+    nx1, ny1, nx2, ny2 = name_bbox
+    name_w = max(1.0, float(nx2 - nx1))
+    name_h = max(1.0, float(ny2 - ny1))
+
+    nd = (
+        cfg.mob_name_detector_main()
+        if hasattr(cfg, "mob_name_detector_main")
+        else {}
+    )
+
+    margin_x_k = _safe_float(nd, "ship_search_margin_x_k", 0.35)
+    height_up_k = _safe_float(nd, "ship_search_height_up_k", 3.0)
+    offset_up_px = _safe_float(nd, "ship_search_offset_up_px", 5.0)
+    blob_thr = _safe_int(nd, "ship_blob_threshold", 170)
+    min_area = _safe_int(nd, "ship_blob_min_area_px", 50)
+    max_area = _safe_int(nd, "ship_blob_max_area_px", 5000)
+    min_w = _safe_int(nd, "ship_min_width_px", 10)
+    min_h = _safe_int(nd, "ship_min_height_px", 10)
+
+    margin_x = int(name_w * margin_x_k)
+    height_up = int(name_h * height_up_k)
+
+    sx1 = max(int(nx1) - margin_x, 0)
+    sx2 = min(int(nx2) + margin_x, w_frame)
+    sy2 = int(max(0.0, float(ny1) - offset_up_px))
+    sy1 = max(sy2 - height_up, 0)
+
+    if sx2 <= sx1 or sy2 <= sy1:
+        return None
+
+    roi = frame_bgr[sy1:sy2, sx1:sx2]
+    if roi is None or roi.size == 0:
+        return None
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    _, binary = cv2.threshold(
+        gray, float(blob_thr), 255, cv2.THRESH_BINARY
+    )
+
+    kernel = np.ones((3, 3), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        binary
+    )
+    if num_labels <= 1:
+        return None
+
+    roi_cx = (sx2 - sx1) * 0.5
+    roi_cy = (sy2 - sy1) * 0.5
+
+    best_idx: Optional[int] = None
+    best_score: Optional[float] = None
+
+    for label in range(1, num_labels):
+        x, y, w_box, h_box, area = stats[label]
+        if area < min_area or area > max_area:
+            continue
+        if w_box < min_w or h_box < min_h:
+            continue
+
+        cx, cy = centroids[label]
+        dx = float(cx) - roi_cx
+        dy = float(cy) - roi_cy
+        d2 = dx * dx + dy * dy
+
+        # Prefer blobs closer to ROI center; smaller score is better.
+        score = d2
+        if best_idx is None or best_score is None or score < best_score:
+            best_idx = label
+            best_score = score
+
+    if best_idx is None:
+        return None
+
+    x, y, w_box, h_box, area = stats[best_idx]
+    if area < min_area or w_box < min_w or h_box < min_h:
+        return None
+
+    ship_x1 = float(sx1 + x)
+    ship_y1 = float(sy1 + y)
+    ship_x2 = ship_x1 + float(w_box)
+    ship_y2 = ship_y1 + float(h_box)
+
+    return (ship_x1, ship_y1, ship_x2, ship_y2)
+
+
+def infer_ship_bbox_from_name_bbox(
+    frame_bgr: np.ndarray,
+    name_bbox: BBox,
+    cfg,
+) -> BBox:
+    """
+    Infer ship bbox on MAIN from a mob name bbox using image blobs.
+
+    The helper first tries to locate a bright blob above the name label.
+    If no reliable blob is found, it falls back to a purely geometric
+    bbox above the name.
+    """
+    blob_bbox = _infer_ship_bbox_blob_from_name_bbox(frame_bgr, name_bbox, cfg)
+    if blob_bbox is not None:
+        return blob_bbox
+
+    return _infer_ship_bbox_geometry_from_name_bbox(name_bbox, cfg)
 
 
 def _xywh_to_bbox(x: float, y: float, w: float, h: float) -> BBox:
@@ -441,7 +570,7 @@ def detect_main_targets_main(
         nx2 = float(x + w_box)
         ny2 = float(y + h_box)
         name_bbox: BBox = (nx1, ny1, nx2, ny2)
-        ship_bbox = infer_ship_bbox_from_name_bbox(name_bbox, cfg)
+        ship_bbox = infer_ship_bbox_from_name_bbox(main_bgr, name_bbox, cfg)
 
         kind = MainTargetKind.ENEMY
         for cb in crate_bboxes:

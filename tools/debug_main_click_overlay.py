@@ -148,6 +148,17 @@ def run_offline_debug(cfg: Config, logger, no_gui: bool = False) -> None:
                 (255, 255, 0),
                 1,
             )
+
+            # Draw name bboxes for all targets (white).
+            for t in targets:
+                nx1, ny1, nx2, ny2 = t.bbox_name
+                cv2.rectangle(
+                    vis,
+                    (int(x_m + nx1), int(y_m + ny1)),
+                    (int(x_m + nx2), int(y_m + ny2)),
+                    (255, 255, 255),
+                    1,
+                )
         else:
             x, y, w_box, h_box = target_box
             # Compute click point in MAIN coords using the same helper as FSM.
@@ -187,6 +198,17 @@ def run_offline_debug(cfg: Config, logger, no_gui: bool = False) -> None:
                 1,
             )
 
+            # Draw name bboxes for all targets (white).
+            for t in targets:
+                nx1, ny1, nx2, ny2 = t.bbox_name
+                cv2.rectangle(
+                    vis,
+                    (int(x_m + nx1), int(y_m + ny1)),
+                    (int(x_m + nx2), int(y_m + ny2)),
+                    (255, 255, 255),
+                    1,
+                )
+
             # Draw all detected enemy ship bboxes in screen coordinates (thin green).
             for enemy in enemies:
                 ex1, ey1, ex2, ey2 = enemy.bbox_ship
@@ -197,10 +219,12 @@ def run_offline_debug(cfg: Config, logger, no_gui: bool = False) -> None:
                     (0, 255, 0),
                     1,
                 )
+                cx = int((ex1 + ex2) * 0.5)
+                cy = int((ey1 + ey2) * 0.5)
                 label_pt = (int(x_m + ex1), int(y_m + ey1) - 4)
                 cv2.putText(
                     vis,
-                    "enemy",
+                    f"enemy ({cx},{cy})",
                     label_pt,
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.4,
@@ -219,10 +243,12 @@ def run_offline_debug(cfg: Config, logger, no_gui: bool = False) -> None:
                     (0, 255, 255),
                     1,
                 )
+                cx = int((bx1 + bx2) * 0.5)
+                cy = int((by1 + by2) * 0.5)
                 label_pt = (int(x_m + bx1), int(y_m + by1) - 4)
                 cv2.putText(
                     vis,
-                    "box",
+                    f"box ({cx},{cy})",
                     label_pt,
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.4,
