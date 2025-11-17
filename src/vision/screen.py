@@ -5,7 +5,9 @@ This module is responsible for detecting enemies and bonus crates
 on the main game screen using classical computer vision methods.
 """
 
-from typing import List, Tuple
+from dataclasses import dataclass
+from enum import Enum
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -17,6 +19,49 @@ from vision.capture import grab_main
 
 setup_logger()
 logger = logging.getLogger(__name__)
+
+
+# Simple alias for rectangular bounding boxes in MAIN coordinates.
+# Convention: (x1, y1, x2, y2) with x2 > x1, y2 > y1.
+BBox = Tuple[float, float, float, float]
+
+
+class MainTargetKind(str, Enum):
+    ENEMY = "enemy"
+    BOX = "box"
+    OTHER = "other"
+
+
+@dataclass
+class MainTarget:
+    """
+    MAIN-screen target detected by name label.
+
+    kind : MainTargetKind
+        High-level type: enemy ship / bonus box / other.
+    bbox_name : BBox
+        Bounding box of the name label (text + frame) in MAIN-local coords.
+    bbox_ship : BBox
+        Approximate bounding box of the ship or box inferred from name.
+    text : str
+        Recognized text (placeholder for future OCR-based classification).
+    """
+
+    kind: MainTargetKind
+    bbox_name: BBox
+    bbox_ship: BBox
+    text: str = ""
+
+
+@dataclass
+class MainEnemy:
+    """
+    Backwards compatible enemy representation (subset of MainTarget).
+    """
+
+    bbox_name: BBox
+    bbox_ship: BBox
+    text: str = ""
 
 
 def _get_hsv(cfg, key: str):
@@ -272,6 +317,176 @@ def mob_label_box_to_click_point(
     cx = x + w // 2
     cy = int(y - h * offset_factor)
     return cx, cy
+
+
+def infer_ship_bbox_from_name_bbox(name_bbox: BBox, cfg) -> BBox:
+    """
+    Infer an approximate ship bbox on MAIN from a mob name bbox.
+
+    The heuristic assumes that the ship is located slightly above the name
+    label and roughly centered horizontally over it. Geometry is controlled
+    by the ``mob_name_detector_main`` config block:
+
+    - ``ship_width_px``
+    - ``ship_height_px``
+    - ``name_to_ship_offset_up_px`` (or legacy ``name_to_ship_offset_px``)
+
+    All values are in MAIN pixels. Reasonable defaults are used if the fields
+    are missing or invalid.
+    """
+    nx1, ny1, nx2, ny2 = name_bbox
+    name_w = max(1.0, float(nx2 - nx1))
+    name_h = max(1.0, float(ny2 - ny1))
+    cx_name = (float(nx1) + float(nx2)) * 0.5
+
+    nd = (
+        cfg.mob_name_detector_main()
+        if hasattr(cfg, "mob_name_detector_main")
+        else {}
+    )
+
+    def _safe_float(d: dict, key: str, default: float) -> float:
+        try:
+            value = float(d.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return value
+
+    # Fallbacks use simple multiples of the name label size.
+    ship_w = _safe_float(nd, "ship_width_px", max(name_w * 2.5, 80.0))
+    ship_h = _safe_float(nd, "ship_height_px", max(name_h * 2.0, 40.0))
+    offset_legacy = _safe_float(
+        nd,
+        "name_to_ship_offset_px",
+        max(name_h * 0.3, 5.0),
+    )
+    offset_up = _safe_float(
+        nd,
+        "name_to_ship_offset_up_px",
+        offset_legacy,
+    )
+
+    sx1 = cx_name - ship_w * 0.5
+    sx2 = cx_name + ship_w * 0.5
+    sy2 = float(ny1) - offset_up
+    sy1 = sy2 - ship_h
+
+    return (sx1, sy1, sx2, sy2)
+
+
+def _xywh_to_bbox(x: float, y: float, w: float, h: float) -> BBox:
+    return (x, y, x + w, y + h)
+
+
+def _bbox_from_crate_xywh(crate: Tuple[int, int, int, int]) -> BBox:
+    cx, cy, cw, ch = crate[:4]
+    return _xywh_to_bbox(float(cx), float(cy), float(cw), float(ch))
+
+
+def _bboxes_intersect(a: BBox, b: BBox) -> bool:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    return ix2 > ix1 and iy2 > iy1
+
+
+def detect_main_targets_main(
+    main_bgr: np.ndarray,
+    cfg,
+    crates: Optional[List[Tuple[int, int, int, int]]] = None,
+) -> List[MainTarget]:
+    """
+    Detect MAIN-screen targets (enemies and bonus boxes) by their name labels.
+
+    Classification heuristic:
+    - labels whose name/ship bbox intersects a detected crate bbox are treated
+      as ``BOX``;
+    - remaining labels are treated as ``ENEMY``.
+
+    Parameters
+    ----------
+    main_bgr : np.ndarray
+        MAIN screen frame (already cropped to MAIN ROI).
+    cfg : Config
+        Configuration object with HSV thresholds and geometry.
+    crates : list[tuple[int, int, int, int]] | None
+        Optional list of crate bboxes (x, y, w, h). If omitted, crates are
+        detected internally via ``find_crates_main``.
+    """
+    if main_bgr is None or main_bgr.size == 0:
+        logger.warning("Empty main frame passed to detect_main_targets_main")
+        return []
+
+    if crates is None:
+        crates = find_crates_main(main_bgr, cfg)
+
+    crate_bboxes: List[BBox] = [
+        _bbox_from_crate_xywh(c)
+        for c in crates
+        if isinstance(c, (tuple, list)) and len(c) >= 4
+    ]
+
+    label_boxes = find_mob_labels_main(main_bgr, cfg)
+    targets: List[MainTarget] = []
+
+    for lb in label_boxes:
+        if not isinstance(lb, (tuple, list)) or len(lb) < 4:
+            continue
+        x, y, w_box, h_box = lb[:4]
+        nx1 = float(x)
+        ny1 = float(y)
+        nx2 = float(x + w_box)
+        ny2 = float(y + h_box)
+        name_bbox: BBox = (nx1, ny1, nx2, ny2)
+        ship_bbox = infer_ship_bbox_from_name_bbox(name_bbox, cfg)
+
+        kind = MainTargetKind.ENEMY
+        for cb in crate_bboxes:
+            if _bboxes_intersect(name_bbox, cb) or _bboxes_intersect(
+                ship_bbox, cb
+            ):
+                kind = MainTargetKind.BOX
+                break
+
+        targets.append(
+            MainTarget(
+                kind=kind,
+                bbox_name=name_bbox,
+                bbox_ship=ship_bbox,
+                text="",
+            )
+        )
+
+    return targets
+
+
+def detect_main_enemies_by_name(
+    main_bgr: np.ndarray, cfg
+) -> List[MainEnemy]:
+    """
+    Return a list of enemies on the MAIN screen detected by their name labels.
+
+    Thin wrapper over ``detect_main_targets_main`` that keeps only ENEMY targets
+    and converts them to ``MainEnemy`` structures for backwards compatibility.
+    """
+    targets = detect_main_targets_main(main_bgr, cfg)
+    enemies: List[MainEnemy] = []
+
+    for t in targets:
+        if t.kind != MainTargetKind.ENEMY:
+            continue
+        enemies.append(
+            MainEnemy(
+                bbox_name=t.bbox_name,
+                bbox_ship=t.bbox_ship,
+                text=t.text,
+            )
+        )
+
+    return enemies
 
 
 if __name__ == "__main__":

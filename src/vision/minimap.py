@@ -1,15 +1,18 @@
 """
 Mini-map vision utilities for Space Aces Bot.
 
-This module handles detection of player and enemies on the mini-map
-using HSV thresholds and simple contour analysis.
+Detection of player and enemies on the mini-map using HSV thresholds
+and simple contour analysis.
 """
+
+from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
+import logging
+
 import cv2
 import numpy as np
-import logging
 
 from config.config import Config
 from utils.logger import setup_logger
@@ -20,6 +23,14 @@ logger = logging.getLogger(__name__)
 
 # Last known player position on minimap (in minimap ROI coordinates).
 _LAST_PLAYER_MM: Optional[Tuple[int, int]] = None
+_PLAYER_FRAME_IDX: int = 0
+
+# Area bounds for player blob in inner minimap coordinates (kept for legacy detectors).
+PLAYER_AREA_MIN: int = 20
+PLAYER_AREA_MAX: int = 2000
+
+# Default peak prominence ratio for line-based player detector.
+PLAYER_LINE_PEAK_RATIO: float = 2.5
 
 
 def _extract_inner_minimap(
@@ -29,9 +40,8 @@ def _extract_inner_minimap(
     Cut out inner part of minimap (without frame, header and scales) using
     percentage margins from cfg.minimap_inner_margin_pct().
 
-    Returns a tuple (inner_bgr, x0, y0) where inner_bgr is the cropped
-    minimap region, and (x0, y0) is the top-left offset in the original
-    minimap ROI coordinates.
+    Returns (inner_bgr, x0, y0) where inner_bgr is the cropped minimap region,
+    and (x0, y0) is the top-left offset in the original minimap ROI.
     """
     if minimap_bgr is None or minimap_bgr.size == 0:
         return None, 0, 0
@@ -43,91 +53,365 @@ def _extract_inner_minimap(
         if cfg is not None and hasattr(cfg, "minimap_inner_margin_pct")
         else {}
     )
-    top = margins.get("top", 0.22)
-    bottom = margins.get("bottom", 0.12)
-    left = margins.get("left", 0.15)
-    right = margins.get("right", 0.05)
+    # Defaults tuned for current profile (fractions of width/height).
+    top = float(margins.get("top", 0.23))
+    bottom = float(margins.get("bottom", 0.09))
+    left = float(margins.get("left", 0.163))
+    right = float(margins.get("right", 0.06))
 
-    x0 = int(w * left)
-    x1 = int(w * (1.0 - right))
-    y0 = int(h * top)
-    y1 = int(h * (1.0 - bottom))
+    # Initial (unclamped) inner rectangle in minimap coordinates.
+    x0_raw = int(round(w * left))
+    y0_raw = int(round(h * top))
+    inner_w_raw = int(round(w * (1.0 - left - right)))
+    inner_h_raw = int(round(h * (1.0 - top - bottom)))
 
-    inner = minimap_bgr[y0:y1, x0:x1]
+    logger.debug(
+        "minimap inner_raw: w=%d h=%d left=%.3f right=%.3f top=%.3f bottom=%.3f "
+        "x0=%d y0=%d w_in=%d h_in=%d",
+        w,
+        h,
+        left,
+        right,
+        top,
+        bottom,
+        x0_raw,
+        y0_raw,
+        inner_w_raw,
+        inner_h_raw,
+    )
+
+    # Clamp to minimap bounds.
+    x0 = max(0, min(x0_raw, w))
+    y0 = max(0, min(y0_raw, h))
+
+    inner_w = max(0, inner_w_raw)
+    inner_h = max(0, inner_h_raw)
+
+    if x0 + inner_w > w:
+        inner_w = max(0, w - x0)
+    if y0 + inner_h > h:
+        inner_h = max(0, h - y0)
+
+    if inner_w <= 0 or inner_h <= 0:
+        logger.debug(
+            "minimap inner_clamped invalid: w=%d h=%d x0=%d y0=%d w_in=%d h_in=%d",
+            w,
+            h,
+            x0,
+            y0,
+            inner_w,
+            inner_h,
+        )
+        return None, 0, 0
+
+    logger.debug(
+        "minimap inner_clamped: w=%d h=%d x0=%d y0=%d w_in=%d h_in=%d",
+        w,
+        h,
+        x0,
+        y0,
+        inner_w,
+        inner_h,
+    )
+
+    inner = minimap_bgr[y0 : y0 + inner_h, x0 : x0 + inner_w]
     return inner, x0, y0
 
 
-def find_player_crosshair(minimap_bgr, cfg=None):
+def _build_player_mask(
+    minimap_bgr: np.ndarray, cfg: Optional[Config] = None
+) -> Tuple[Optional[np.ndarray], Tuple[int, int, int, int]]:
     """
-    Находит позицию игрока по перекрёстку на миникарте.
+    Build binary mask for player crosshair on the minimap.
 
-    Логика:
-    1. Берём внутреннюю часть миникарты (_extract_inner_minimap), чтобы убрать рамку и заголовок.
-    2. В HSV ищем циановые/белые линии (перекрёст).
-    3. Строим маску, считаем суммы по строкам и столбцам, берём максимумы — это линии.
-    4. Если HSV не дал результата — fallback на обычный threshold по яркости (grayscale).
-    5. Если и тогда ничего — возвращаем последнюю удачную позицию, если она есть.
-    6. Возвращаем координаты в системе ROI миникарты (x, y).
+    Returns
+    -------
+    mask : np.ndarray | None
+        Binary mask (0/255) in inner-minimap coordinates, or None on failure.
+    rect : tuple[int, int, int, int]
+        Inner minimap rectangle in minimap coordinates: (x0, y0, w_in, h_in).
     """
-
-    global _LAST_PLAYER_MM
-
-    # 1. Вырезаем внутреннюю область миникарты
     inner, x0, y0 = _extract_inner_minimap(minimap_bgr, cfg)
     if inner is None or inner.size == 0:
-        return _LAST_PLAYER_MM
+        return None, (x0, y0, 0, 0)
 
-    h, w = inner.shape[:2]
-    _ = (h, w)  # переменная для удобной отладки
+    h_in, w_in = inner.shape[:2]
+    if h_in < 5 or w_in < 5:
+        return None, (x0, y0, w_in, h_in)
 
-    # 2. Пробуем по HSV (циан + белый)
-    hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
-    hsv_cfg = cfg.hsv() if hasattr(cfg, "hsv") else {}
-
-    line1_min = np.array(
-        hsv_cfg.get("player_minimap_line_1_min", [75, 40, 120]), dtype=np.uint8
-    )
-    line1_max = np.array(
-        hsv_cfg.get("player_minimap_line_1_max", [110, 255, 255]), dtype=np.uint8
-    )
-    line2_min = np.array(
-        hsv_cfg.get("player_minimap_line_2_min", [0, 0, 180]), dtype=np.uint8
-    )
-    line2_max = np.array(
-        hsv_cfg.get("player_minimap_line_2_max", [179, 80, 255]), dtype=np.uint8
-    )
-
-    mask1 = cv2.inRange(hsv, line1_min, line1_max)
-    mask2 = cv2.inRange(hsv, line2_min, line2_max)
-    mask = cv2.bitwise_or(mask1, mask2)
-
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-    col_sum = mask.sum(axis=0).astype(np.float32)
-    row_sum = mask.sum(axis=1).astype(np.float32)
-
-    # 3. Если HSV-маска пустая, fallback на grayscale
-    if col_sum.max() == 0 or row_sum.max() == 0:
+    # Convert inner minimap to grayscale and threshold bright gray crosshair lines.
+    try:
         gray = cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY)
-        # Порог опускаем до 120, чтобы захватить не очень яркие линии
-        _, thr = cv2.threshold(gray, 120, 255, cv2.THRESH_BINARY)
-        col_sum = thr.sum(axis=0).astype(np.float32)
-        row_sum = thr.sum(axis=1).astype(np.float32)
+    except Exception:
+        logger.exception("build_player_mask: failed to convert inner minimap to grayscale")
+        return None, (x0, y0, w_in, h_in)
 
-    # 4. Если вообще ничего не нашли — возвращаем последнюю известную позицию
+    gray_blur = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    thr = 50
+    if cfg is not None and hasattr(cfg, "player_minimap_gray_thr"):
+        try:
+            thr = int(cfg.player_minimap_gray_thr())  # type: ignore[call-arg]
+        except Exception:
+            thr = 50
+    thr = max(0, min(255, thr))
+
+    _, mask = cv2.threshold(gray_blur, thr, 255, cv2.THRESH_BINARY)
+
+    # Optional: small dilation to make thin lines more robust.
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+
+    return mask, (x0, y0, w_in, h_in)
+
+
+def _find_player_crosshair_legacy(
+    minimap_bgr: np.ndarray, cfg: Optional[Config] = None
+) -> Optional[Tuple[int, int]]:
+    """
+    Legacy player detector kept for reference / experimentation.
+
+    Not used by the main pipeline.
+    """
+    inner, x0, y0 = _extract_inner_minimap(minimap_bgr, cfg)
+    if inner is None or inner.size == 0:
+        return None
+
+    try:
+        gray = cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY)
+    except Exception:
+        return None
+
+    try:
+        _, thr = cv2.threshold(gray, 160, 255, cv2.THRESH_BINARY)
+    except Exception:
+        return None
+
+    col_sum = thr.sum(axis=0).astype(np.float32)
+    row_sum = thr.sum(axis=1).astype(np.float32)
+
     if col_sum.max() == 0 or row_sum.max() == 0:
-        return _LAST_PLAYER_MM
+        return None
 
     vert_x = int(np.argmax(col_sum))
     horiz_y = int(np.argmax(row_sum))
 
     global_x = x0 + vert_x
     global_y = y0 + horiz_y
+    return global_x, global_y
 
-    _LAST_PLAYER_MM = (global_x, global_y)
-    return _LAST_PLAYER_MM
+
+def _is_near_corner(x: int, y: int, w: int, h: int, radius: int = 20) -> bool:
+    """
+    Return True if point (x, y) lies within `radius` pixels of any corner
+    of a rectangle with size (w, h), in minimap ROI coordinates.
+    """
+    corners = (
+        (0, 0),
+        (w - 1, 0),
+        (0, h - 1),
+        (w - 1, h - 1),
+    )
+    r2 = radius * radius
+    for cx, cy in corners:
+        dx = x - cx
+        dy = y - cy
+        if dx * dx + dy * dy <= r2:
+            return True
+    return False
+
+
+def _point_in_rect(x: int, y: int, rect: Tuple[int, int, int, int]) -> bool:
+    rx, ry, rw, rh = rect
+    return (rx <= x <= rx + rw) and (ry <= y <= ry + rh)
+
+
+def _is_in_player_ignore_region(
+    x: int,
+    y: int,
+    cfg: Optional[Config],
+    w_mm: int,
+    h_mm: int,
+) -> bool:
+    """
+    Check if point (x, y) lies inside any "forbidden" region for player
+    position on the minimap.
+
+    Priority:
+    1) If profile defines minimap_player_ignore_regions as
+       {"id": [x, y, w, h], ...} in minimap ROI coordinates, use them.
+    2) Otherwise, if minimap_enemy_detector().get("ignore_regions") exists,
+       reuse those regions for the player.
+    3) If nothing is configured, use four default corner rectangles
+       (portal zones) as fractions of minimap width/height.
+    """
+    regions: dict[str, list[int]] = {}
+
+    # 1) Explicit regions for player.
+    if cfg is not None and hasattr(cfg, "minimap_player_ignore_regions"):
+        try:
+            regions = cfg.minimap_player_ignore_regions() or {}
+        except Exception:
+            regions = {}
+
+    # 2) Fallback: reuse enemy ignore_regions.
+    if not regions and cfg is not None and hasattr(cfg, "minimap_enemy_detector"):
+        try:
+            det_cfg = cfg.minimap_enemy_detector() or {}
+            regions = det_cfg.get("ignore_regions", {}) or {}
+        except Exception:
+            regions = {}
+
+    # 3) Regions defined in profile.
+    for rect in regions.values():
+        if len(rect) != 4:
+            continue
+        if _point_in_rect(x, y, tuple(rect)):  # type: ignore[arg-type]
+            return True
+
+    # 4) Default: four corner rectangles (approximate portal zones).
+    if not regions:
+        margin_x = int(w_mm * 0.22)
+        margin_y = int(h_mm * 0.35)
+
+        corner_rects = [
+            (0, 0, margin_x, margin_y),  # top-left
+            (w_mm - margin_x, 0, margin_x, margin_y),  # top-right
+            (0, h_mm - margin_y, margin_x, margin_y),  # bottom-left
+            (w_mm - margin_x, h_mm - margin_y, margin_x, margin_y),  # bottom-right
+        ]
+        for rect in corner_rects:
+            if _point_in_rect(x, y, rect):
+                return True
+
+    return False
+
+
+def find_player_crosshair(
+    minimap_bgr: np.ndarray, cfg: Optional[Config] = None
+) -> Optional[Tuple[int, int]]:
+    """
+    Find player position on minimap as intersection of two cyan crosshair lines.
+
+    Algorithm:
+    - Work on inner minimap region (without frame / header) using _extract_inner_minimap.
+    - Build HSV mask for the cyan lines from profile thresholds.
+    - Sum mask over rows/columns to obtain line strength profiles.
+    - Take argmax over row_sum/col_sum as line positions and apply simple peak-ratio checks.
+    - Convert intersection point back to minimap ROI coordinates and return (x, y).
+    """
+    global _LAST_PLAYER_MM, _PLAYER_FRAME_IDX
+
+    _PLAYER_FRAME_IDX += 1
+
+    if minimap_bgr is None or minimap_bgr.size == 0:
+        logger.debug("find_player_crosshair: empty minimap frame")
+        return None
+
+    h_mm, w_mm = minimap_bgr.shape[:2]
+
+    # Reuse common mask builder so that debug tools can visualize the same mask.
+    mask, (x0, y0, w_in, h_in) = _build_player_mask(minimap_bgr, cfg)
+    if mask is None or mask.size == 0 or w_in <= 0 or h_in <= 0:
+        logger.debug(
+            "find_player_crosshair: empty/invalid player mask (full=%dx%d inner=%dx%d)",
+            w_mm,
+            h_mm,
+            w_in,
+            h_in,
+        )
+        return None
+
+    # Sum along rows and columns to find strongest horizontal/vertical lines.
+    row_sum = mask.sum(axis=1).astype(np.float32)  # shape (h_in,)
+    col_sum = mask.sum(axis=0).astype(np.float32)  # shape (w_in,)
+
+    row_max = float(row_sum.max())
+    col_max = float(col_sum.max())
+    row_mean = float(row_sum.mean())
+    col_mean = float(col_sum.mean())
+
+    logger.debug(
+        "find_player_crosshair: inner=%dx%d row_max=%.1f row_mean=%.1f "
+        "col_max=%.1f col_mean=%.1f",
+        w_in,
+        h_in,
+        row_max,
+        row_mean,
+        col_max,
+        col_mean,
+    )
+
+    if row_max == 0.0 or col_max == 0.0:
+        if _PLAYER_FRAME_IDX % 30 == 0:
+            logger.info(
+                "find_player_crosshair: no line signal in mask "
+                "(row_max=%.1f col_max=%.1f)",
+                row_max,
+                col_max,
+            )
+        return None
+
+    ratio_cfg = PLAYER_LINE_PEAK_RATIO
+    if cfg is not None and hasattr(cfg, "player_minimap_line_ratio"):
+        try:
+            ratio_cfg = float(cfg.player_minimap_line_ratio())  # type: ignore[call-arg]
+        except Exception:
+            ratio_cfg = PLAYER_LINE_PEAK_RATIO
+
+    # Lines are the global maxima over rows/columns.
+    y_line = int(np.argmax(row_sum))
+    x_line = int(np.argmax(col_sum))
+
+    row_peak = float(row_sum[y_line])
+    col_peak = float(col_sum[x_line])
+
+    # Simple peak prominence checks to avoid random noise.
+    if row_mean > 0.0 and row_peak < ratio_cfg * row_mean:
+        logger.debug(
+            "find_player_crosshair: weak horizontal line peak row_peak=%.1f "
+            "row_mean=%.1f ratio=%.2f thr=%.2f",
+            row_peak,
+            row_mean,
+            row_peak / max(row_mean, 1e-6),
+            ratio_cfg,
+        )
+        return None
+
+    if col_mean > 0.0 and col_peak < ratio_cfg * col_mean:
+        logger.debug(
+            "find_player_crosshair: weak vertical line peak col_peak=%.1f "
+            "col_mean=%.1f ratio=%.2f thr=%.2f",
+            col_peak,
+            col_mean,
+            col_peak / max(col_mean, 1e-6),
+            ratio_cfg,
+        )
+        return None
+
+    px = x0 + x_line
+    py = y0 + y_line
+    player_mm = (int(px), int(py))
+
+    logger.debug(
+        "find_player_crosshair: minimap=%dx%d inner=%dx%d x0=%d y0=%d "
+        "x_line=%d y_line=%d player_mm=%s",
+        w_mm,
+        h_mm,
+        w_in,
+        h_in,
+        x0,
+        y0,
+        x_line,
+        y_line,
+        player_mm,
+    )
+
+    if _PLAYER_FRAME_IDX % 30 == 0:
+        logger.info("find_player_crosshair: player_mm=%s", player_mm)
+
+    _LAST_PLAYER_MM = player_mm
+    return player_mm
 
 
 def find_enemies(
@@ -136,14 +420,12 @@ def find_enemies(
     map_name: Optional[str] = None,
 ) -> List[Tuple[int, int]]:
     """
-    Простой детектор врагов (красные точки) на миникарте.
+    Simple enemy detector (red dots) on minimap.
 
-    - Использует только HSV-маску красного.
-    - Работает во внутренней части миникарты.
-    - Фильтрует по базовым размерам контура.
-
-    НЕ вычитает позицию игрока и не учитывает ignore-зоны, чтобы не ломать детекцию.
-    Возвращает список координат (x, y) в системе координат ROI миникарты.
+    - Uses HSV mask for two red ranges.
+    - Works on inner minimap.
+    - Filters by basic contour size.
+    - Returns coordinates in minimap ROI system.
     """
     inner, x0, y0 = _extract_inner_minimap(minimap_bgr, cfg)
     if inner is None or inner.size == 0:
@@ -153,7 +435,7 @@ def find_enemies(
     hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
     hsv_cfg = cfg.hsv() if hasattr(cfg, "hsv") else {}
 
-    def _val(key: str, default: list[int]) -> np.ndarray:
+    def _val(key: str, default: List[int]) -> np.ndarray:
         return np.array(hsv_cfg.get(key, default), dtype=np.uint8)
 
     red1_min = _val("enemy_minimap_red_1_min", [0, 102, 64])
@@ -214,4 +496,3 @@ if __name__ == "__main__":
     enemies = find_enemies(minimap_frame, cfg)
 
     logger.info("Sanity minimap: player=%s, enemies=%d", player, len(enemies))
-

@@ -3,17 +3,19 @@
     "MAIN": [
       0,
       0,
-      1916,
-      1027
+      1918,
+      1034
     ],
     "MINIMAP": [
-      1472,
-      728,
-      362,
-      218
+      1405,
+      655,
+      467,
+      317
     ]
   },
   "HSV": {
+    "player_minimap_gray_thr": 50,
+    "player_minimap_line_ratio": 2.5,
     "enemy_minimap_red_1_min": [
       0,
       102,
@@ -66,8 +68,8 @@
     ],
     "player_minimap_line_1_min": [
       80,
-      40,
-      140
+      80,
+      160
     ],
     "player_minimap_line_1_max": [
       110,
@@ -77,11 +79,11 @@
     "player_minimap_line_2_min": [
       0,
       0,
-      180
+      255
     ],
     "player_minimap_line_2_max": [
-      179,
-      60,
+      0,
+      0,
       255
     ],
     "crate_main_yellow_min": [
@@ -109,16 +111,16 @@
     "shield_flee_pct": 25
   },
   "minimap_inner_margin_pct": {
-    "top": 0.22,
-    "bottom": 0.12,
-    "left": 0.15,
-    "right": 0.05
+    "top": 0.23,
+    "bottom": 0.09,
+    "left": 0.163,
+    "right": 0.06
   },
   "mobs_main_detector": {
     "play_area_margin_pct": {
       "top": 0.18,
       "bottom": 0.18,
-      "left": 0.10,
+      "left": 0.1,
       "right": 0.25
     },
     "min_area": 120,
@@ -131,7 +133,7 @@
       "top": 0.12,
       "bottom": 0.25,
       "left": 0.05,
-      "right": 0.20
+      "right": 0.2
     },
     "area_min": 20,
     "area_max": 20000,
@@ -141,7 +143,11 @@
     "height_max": 80,
     "min_aspect_ratio": 1.5,
     "max_aspect_ratio": 25.0,
-    "click_offset_factor": 0.9
+    "click_offset_factor": 0.9,
+    "ship_width_px": 140.0,
+    "ship_height_px": 90.0,
+    "name_to_ship_offset_px": 18.0,
+    "name_to_ship_offset_up_px": 18.0
   },
   "minimap_enemy_detector": {
     "area_min": 3,

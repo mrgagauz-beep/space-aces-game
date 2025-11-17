@@ -66,3 +66,35 @@ class Config:
     def mob_name_detector_main(self) -> dict:
         """Return config block for main-screen mob name detector."""
         return self.data.get("mob_name_detector_main", {})
+
+    def farming(self) -> dict:
+        """Return config block for farming behavior."""
+        return self.data.get("farming", {})
+
+    def farming_main_focus_timeout_ticks(self) -> int:
+        """
+        How many FSM ticks to keep prioritizing MAIN targets
+        after the last visible main target before falling back
+        to minimap-driven search/approach.
+        """
+        farming_cfg = self.farming()
+        try:
+            value = int(farming_cfg.get("main_focus_timeout_ticks", 15))
+        except (TypeError, ValueError):
+            value = 15
+        return max(0, value)
+
+    def player_minimap_gray_thr(self) -> int:
+        """Return grayscale threshold for minimap player crosshair lines (0-255)."""
+        hsv = self.hsv()
+        value = int(hsv.get("player_minimap_gray_thr", 50))
+        return max(0, min(255, value))
+
+    def player_minimap_line_ratio(self) -> float:
+        """Return peak prominence ratio for minimap player crosshair lines."""
+        hsv = self.hsv()
+        try:
+            ratio = float(hsv.get("player_minimap_line_ratio", 2.5))
+        except (TypeError, ValueError):
+            ratio = 2.5
+        return max(0.1, ratio)
